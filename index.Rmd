@@ -1,0 +1,146 @@
+---
+title: 'Human Activity Recognition: Measuring Weight Lifting Exercises Quality of
+  Execution'
+author: "Frédéric Auberson"
+date: "11 January 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#Install Caret with:
+# install.packages("caret", dependencies = c("Depends", "Suggests"))
+library(caret)
+#Set-up caret to use multiple cores
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+```
+
+*This document is a submission for the final, peer-graded assignment that is required as part of Coursera's Practical Machine Learning lesson. The data used here is taken from Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.*  
+
+## Introduction
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. 
+One thing that people regularly do is quantify *how much* of a particular activity they do, but they rarely quantify *how well* they do it. In this project, our goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. Using this data, we will train a classifier which will predict the manner in which they executed the exercise, and we will calculate the out-of-sample error of the classifier.
+More information on the dataset used is available from http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+## Data Loading and Cleaning
+
+The data is first downloaded from an alternate location provided by Coursera (for reproducibility, and so as not to unduly tax PUC Rio's Servers), and parsed:
+
+```{r load, echo=TRUE}
+if (!file.exists("pml-training.csv")) {
+    download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", "pml-training.csv")
+}
+trainSet <- read.csv("pml-training.csv")
+
+if (!file.exists("pml-testing.csv")) {
+    download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv","pml-testing.csv")
+}
+testCases <- read.csv("pml-testing.csv")
+```
+
+A cursory look at the data shows that many columns are very sparsely poulated, consisting mainly of NA values. Others show very little variance. The first condition can be detected by counting NA values per column and singling out any column with, say, more than 90% NA values. The second is calculated directly by the nearZeroVar function (from the Caret library). These columns will not produce good predictors, and can be removed from the dataset, which will speed up processing later on:
+
+```{r filter, echo=TRUE}
+sparseColumn <- which(sapply(trainSet, function(x) sum(is.na(x))/length(x) > 0.9))
+lowVarColumn <- nearZeroVar(trainSet)
+
+#Filter out first column, and any sparse or low-variance column
+filter <- unique(append(lowVarColumn,sparseColumn))
+filter <- unique(append(1, filter))
+
+trainSet <- trainSet[, -filter]
+testCases <- testCases[, -filter]
+```
+
+The `r dim(testCases)[[1]]` test cases provided do not contain the value we're predicting, and so cannot be used as a test set to calculate accuracy. For this reason, we'll split the `r dim(trainSet)[[1]]` observations we have into a training set (containing 80% of the data) and a test set (with the remaining 20%)
+
+```{r split, echo=TRUE}
+inTrain<-createDataPartition(trainSet$classe, p=0.8, list=F)
+testSet<-trainSet[-inTrain,]
+trainSet<-trainSet[inTrain,] 
+```
+
+After this, our training set contains `r dim(trainSet)[[1]]` observation, and our test set `r dim(testSet)[[1]]`.
+
+## Data Loading and Cleaning
+
+In order to find the most suitable training method for this problem, we will leverage the Caret package to try out a number of models, most of which have already presented in the Coursera "Practical Machine Learning" course. By using Caret, additional models can be added easily. As an example, a method, called C5.0, was selected from the list of available Model types in Caret (http://topepo.github.io/caret/available-models.html) and added to the list of methods to train. 
+
+To train the models, Caret is configured so as to use 10-fold Cross Validation on the training set only, meaning the test set is not used during training: The training set is split by Caret into 10 subsets, and each subset in turn is used for validation on a model trained on the other subsets.
+
+```{r train-params, echo=TRUE}
+# Specify training parameters common to all models
+formula <- classe ~ .
+control = trainControl(method="cv", number=10, allowParallel = TRUE)
+metric = "Accuracy"
+models <- list()
+```
+```{r train-lda, echo=TRUE, cache=TRUE, results=FALSE, message=FALSE, warning=FALSE}
+lda <- train(formula, data=trainSet, method="lda", metric=metric, trControl=control) 
+```
+```{r train-cart, echo=TRUE, cache=TRUE, results=FALSE, message=FALSE, warning=FALSE}
+cart <- train(formula, data=trainSet, method="rpart", metric=metric, trControl=control) 
+```
+```{r train-knn, echo=TRUE, cache=TRUE, results=FALSE, message=FALSE, warning=FALSE}
+knn <- train(formula, data=trainSet, method="knn", metric=metric, trControl=control) 
+```
+```{r train-svmLinear, echo=TRUE, cache=TRUE, results=FALSE, message=FALSE, warning=FALSE}
+svmLinear <- train(formula, data=trainSet, method="svmLinear", metric=metric, trControl=control) 
+```
+```{r train-gbm, echo=TRUE, cache=TRUE, results=FALSE, message=FALSE, warning=FALSE}
+gbm <- train(formula, data=trainSet, method="gbm", metric=metric, trControl=control) 
+```
+```{r train-rf, echo=TRUE, cache=TRUE, results=FALSE, message=FALSE, warning=FALSE}
+rf <- train(formula, data=trainSet, method="rf", metric=metric, trControl=control) 
+```
+```{r train-c50, echo=TRUE, cache=TRUE, results=FALSE, message=FALSE, warning=FALSE}
+c50 <- train(formula, data=trainSet, method="C5.0", metric=metric, trControl=control) 
+```
+
+Starting from here, one would typically spend more time adding preprocessing and training options specifically for each model, meaning that this document would be changed often before it reaches its final state. In order to speed up processing, each model is trained separately, and the result is cached. This way, when the options of one specific model are changed, or a model is added, the unchanged models do not have to be recalculated. 
+
+A Plot will help us compare the models we've just trained: 
+
+```{r make-models-dotplot, echo=TRUE, width=10}
+models <- list(lda, cart, knn, svmLinear, gbm, rf, c50)
+names(models) <- sapply(models, function(x) get("label", x$modelInfo))
+modelScores <- resamples(models)
+bwplot(modelScores)
+```
+
+The top performers show very close results, with the top three performers having nearly perfect scores (over 99% acuuracy):  
+
+```{r make-models-summary, echo=FALSE, size='\\small'}
+summary(modelScores)
+```
+
+## Results
+
+A number of outstanding models have been found, and the top few performers are very close in terms of precision. Let us choose the Random Forest-based model, as its accuracy is highest. We will now measure its accuracy on the test set:
+
+```{r results, echo=TRUE, message=FALSE}
+confmat <- confusionMatrix(testSet$classe, predict(rf, testSet))
+```
+```{r results-echo, echo=FALSE}
+confmat
+```
+
+The Random Forest-based model boasts an accuracy of `r round(confmat$overall[1]*100, 2)`% on the test set, meaning the estimated out-of-sample error rate is   `r round((1-confmat$overall[1])*100, 2)`%.
+
+Using this model, we can predict the results of the test cases provided, which are so far unknown to us:
+
+```{r testcases, echo=TRUE}
+predict(rf, testCases)
+```
+
+When submitted to the Course Project Prediction Quiz on coursera, this yields a 100% score: Our Random Forest-based predictor works as expected.
+
+```{r cleanup, echo=FALSE}
+# Disable multicore processing
+stopCluster(cluster)
+registerDoSEQ()
+```
